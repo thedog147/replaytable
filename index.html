@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HexCiv 回放行動表</title>
+<style>
+:root{
+  --bg:#12151a; --panel:#1b2028; --line:#2c333d; --text:#e8e6df; --dim:#9a9a94;
+  --gold:#c9a84c; --red:#e07070; --blue:#6fa0e8; --redbg:#2a1616; --bluebg:#141c2c;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 "Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
+header{padding:14px 16px 6px}
+h1{margin:0 0 4px;font-size:18px;color:var(--gold);letter-spacing:1px}
+.sub{color:var(--dim);font-size:12px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 16px}
+button,select,label.btn{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 12px;font:inherit;min-height:40px}
+button.primary,label.primary{background:var(--gold);color:#1a1408;border-color:var(--gold);font-weight:700}
+button:disabled{opacity:.4}
+label.chk{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:13px}
+input[type=file]{display:none}
+.meta{margin:4px 16px 8px;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);font-size:13px;display:none}
+.meta b{color:var(--gold)}
+.tabs{display:flex;gap:4px;padding:0 16px}
+.tabs button{border-radius:6px 6px 0 0;border-bottom:none}
+.tabs button.on{background:var(--gold);color:#1a1408;border-color:var(--gold);font-weight:700}
+.wrap{margin:0 16px 24px;border:1px solid var(--line);border-radius:0 6px 6px 6px;overflow:auto;max-height:calc(100vh - 230px);min-height:200px;background:var(--panel)}
+table{border-collapse:separate;border-spacing:0;font-size:12.5px}
+th,td{border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:6px 8px;vertical-align:top;text-align:left}
+thead th{position:sticky;top:0;background:#222a35;z-index:2;white-space:nowrap}
+tbody th{position:sticky;left:0;z-index:1;background:#1f242c;white-space:nowrap;min-width:130px}
+thead th:first-child{left:0;z-index:3}
+tr.RED th{border-left:4px solid var(--red)}
+tr.BLUE th{border-left:4px solid var(--blue)}
+td.cell{min-width:150px;max-width:210px;white-space:pre-wrap;word-break:break-word}
+td.idle{color:var(--dim)}
+td.dead{color:#6a6a66;background:#161a20}
+td .pos{color:var(--gold)}
+td .atk{color:#f0a070}
+td .def{color:#d98a8a}
+td .die{color:#ff6b6b;font-weight:700}
+td .oth{color:#8fd18f}
+td .hp{color:var(--dim)}
+.empty{padding:40px 16px;text-align:center;color:var(--dim)}
+.tip{padding:0 16px 12px;color:var(--dim);font-size:12px}
+.err{color:#ff8a8a;padding:8px 16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>HexCiv 回放行動表</h1>
+  <div class="sub">讀取伺服器的回放檔（.jsonl），整理成「回合 × 角色單位」的行動表。資料只在這支手機／電腦上處理，不會上傳。</div>
+</header>
+
+<div class="bar">
+  <label class="btn primary" for="f">📂 選擇回放檔</label>
+  <input id="f" type="file" accept=".jsonl,.json,.txt">
+  <button id="xlsx" disabled>📥 匯出 Excel</button>
+</div>
+<div id="err" class="err" style="display:none"></div>
+<div id="meta" class="meta"></div>
+
+<div class="bar" id="filters" style="display:none">
+  <select id="fteam"><option value="">全部陣營</option><option value="RED">紅軍</option><option value="BLUE">藍軍</option></select>
+  <select id="fplayer"><option value="">全部玩家</option></select>
+  <label class="chk"><input type="checkbox" id="fhp" checked> 顯示血量</label>
+  <label class="chk"><input type="checkbox" id="fidle" checked> 顯示待命位置</label>
+</div>
+
+<div class="tabs" id="tabs" style="display:none">
+  <button id="t1" class="on">行動矩陣</button>
+  <button id="t2">行動明細</button>
+</div>
+<div class="wrap" id="wrap"><div class="empty">請先選擇回放檔</div></div>
+<div class="tip">座標為遊戲內的 (q,r)。「回合 0」是部署階段。同一回合內雙方行動都算在該回合。</div>
+
+<script>
+// ═════════════ 核心：解析回放 ═════════════
+const TYPE_ZH = {
+  BDE_COMMANDER:'旅指揮官', BN_COMMANDER:'營指揮官', COMMANDER:'指揮官', INFANTRY:'步兵', MECH_INFANTRY:'機步',
+  TANK:'戰車', SCOUT:'偵查車', ARTILLERY:'砲兵', SUPPLY:'補給車', PSYOPS:'喊話車', COMM_OFFICER:'通信兵',
+  POLIT_OFFICER:'政戰官', INF_SUPPLY:'步兵補給車', MECH_SUPPLY:'機步補給車', TANK_SUPPLY:'戰車補給車'
+};
+const TYPE_ORDER = Object.keys(TYPE_ZH);
+const WEAPON_ZH = { BVR:'超視距火力', AT_HEAVY:'重型反戰車', TOW:'拖式飛彈', MORTAR:'迫擊砲' };
+const REFUGEE_ZH = { CALM:'安撫災民', AID:'救助災民', STEAL:'災民偷竊' };
+const TEAM_ZH = { RED:'紅軍', BLUE:'藍軍' };
+
+
+// 依位置推算「這個事件是玩家的哪一台單位做的」
+// 回傳 {uid, guess}：同格且唯一 → 確定；其餘（同格多台、隔壁格）→ 推測；找不到 → null
+function hexDist(a,b){ const dq=a.q-b.q, dr=a.r-b.r; return (Math.abs(dq)+Math.abs(dr)+Math.abs(dq+dr))/2; }
+function findActor(pidNum, q, r, pos, dead, units, preferSupply){
+  const here = {q,r}, cand = [];
+  for(const uid of Object.keys(pos)){
+    const u = units[uid]; if(!u || u.pid!==pidNum || dead[uid]!=null) continue;
+    const d = hexDist(pos[uid], here);
+    if(d<=1) cand.push({uid, d, sup: /SUPPLY/.test(u.typeID)});
+  }
+  if(!cand.length) return null;
+  cand.sort((a,b)=> a.d-b.d || ((preferSupply?(b.sup-a.sup):0)) || a.uid.localeCompare(b.uid,undefined,{numeric:true}));
+  const same = cand.filter(c=>c.d===0);
+  const sure = same.length===1;
+  return { uid: cand[0].uid, guess: !sure };
+}
+
+function parseReplay(text){
+  const events = [];
+  for(const line of text.split(/\r?\n/)){
+    const s = line.trim(); if(!s) continue;
+    try{ const o = JSON.parse(s); if(o && o.type) events.push(o); }catch(_){}
+  }
+  if(!events.length) throw new Error('檔案裡找不到可讀的回放事件，請確認是 replay_*.jsonl');
+
+  // 玩家名稱：取每位玩家「最後一次」出現的名字
+  const pname = {};
+  for(const e of events){
+    if((e.type==='PLAYER_JOINED' || e.type==='PLAYER_RECONNECTED') && e.payload && e.payload.playerID!=null)
+      pname[e.payload.playerID] = e.payload.name || ('玩家'+e.payload.playerID);
+  }
+  const pid = uid => parseInt(String(uid).split('_')[0],10);
+  const pn = id => pname[id] || ('玩家'+id);
+
+  // 先掃一遍建立單位與名稱，之後攻擊紀錄才能直接寫出對手名稱
+  const units = {};
+  for(const e of events){
+    const p = e.payload || {};
+    if((e.type==='UNIT_SPAWN' || e.type==='UNIT_MOVE') && p.uid && !units[p.uid])
+      units[p.uid] = { uid:p.uid, team:p.team, pid:pid(p.uid), typeID:p.typeID };
+  }
+  const list0 = Object.values(units);
+  const count = {};
+  for(const u of list0){ const k=u.pid+'|'+u.typeID; count[k]=(count[k]||0)+1; }
+  const seen = {};
+  list0.sort((a,b)=> (a.team===b.team?0:(a.team==='RED'?-1:1)) || a.pid-b.pid ||
+     (TYPE_ORDER.indexOf(a.typeID)-TYPE_ORDER.indexOf(b.typeID)) || a.uid.localeCompare(b.uid,undefined,{numeric:true}));
+  for(const u of list0){
+    const k=u.pid+'|'+u.typeID; seen[k]=(seen[k]||0)+1;
+    u.label = `${pn(u.pid)}-${TYPE_ZH[u.typeID]||u.typeID}` + (count[k]>1 ? '#'+seen[k] : '');
+    u.player = pn(u.pid);
+  }
+
+  const cells = {};          // uid → {turn → cell}
+  const longRows = [];       // 明細
+  const pos = {};            // uid → {q,r}
+  const dead = {};           // uid → turn
+  const extraKey = id => 'X_'+id; // 玩家層級事件（沒有指定單位）
+  let turn = 0, team = null, maxTurn = 0;
+  const meta = { map:'', winner:'', reason:'', players:0 };
+
+  const lbl = uid => (units[uid] && units[uid].label) || String(uid);
+  function cell(uid){
+    if(!cells[uid]) cells[uid] = {};
+    if(!cells[uid][turn]) cells[uid][turn] = { start: pos[uid]?{...pos[uid]}:null, end:null, moves:0, lines:[], hp:null };
+    return cells[uid][turn];
+  }
+  function add(uid, cls, text, kind){
+    const c = cell(uid);
+    c.lines.push({cls, text});
+    const u = units[uid] || { team:'', pid:pid(String(uid).replace('X_','')), label:String(uid)};
+    longRows.push({ turn, team: u.team||'', player: pn(u.pid), unit: u.label, kind, text });
+  }
+  const P = (q,r) => `(${q},${r})`;
+
+  for(const e of events){
+    const p = e.payload || {}, t = e.type;
+    if(t==='GAME_START'){ meta.map = p.mapType||''; meta.players = (p.players||[]).length; }
+    else if(t==='GAME_OVER'){ meta.winner = p.winningTeam||''; meta.reason = p.reason||''; }
+    else if(t==='TURN_ADVANCE'){ turn = p.turnCount||0; team = p.activeTeam||null; if(turn>maxTurn) maxTurn = turn; }
+    else if(t==='UNIT_SPAWN'){
+      pos[p.uid] = { q:p.q, r:p.r };
+      const c = cell(p.uid); c.start = null; c.end = {q:p.q,r:p.r};
+      add(p.uid,'pos',`部署 ${P(p.q,p.r)}`,'部署');
+    }
+    else if(t==='UNIT_MOVE'){
+      const c = cell(p.uid);
+      const from = pos[p.uid] || null;
+      if(!from || from.q!==p.q || from.r!==p.r){
+        c.moves++; c.end = {q:p.q,r:p.r};
+        longRows.push({ turn, team:p.team, player:pn(pid(p.uid)), unit:'', kind:'移動',
+          text:`${from?P(from.q,from.r):'?'}→${P(p.q,p.r)}`, _uid:p.uid });
+      }
+      pos[p.uid] = { q:p.q, r:p.r };
+      if(typeof p.hp==='number') c.hp = p.hp;
+    }
+    else if(t==='ATTACK_RESULT'){
+      const a=p.attackerUID, d=p.defenderUID;
+      add(a,'atk',`近戰攻擊 ${lbl(d)}：造成 ${p.damage}，受反擊 ${p.counterDmg}`,'近戰攻擊');
+      cell(a).hp = p.attackerHP;
+      add(d,'def',`被 ${lbl(a)} 近戰攻擊：受 ${p.damage}，反擊 ${p.counterDmg}`,'被近戰攻擊');
+      cell(d).hp = p.defenderHP;
+    }
+    else if(t==='RANGED_ATTACK_RESULT'){
+      const a=p.attackerUID, d=p.defenderUID, w=WEAPON_ZH[p.weapon]||p.weapon;
+      const tgt = d ? lbl(d) : `地點 ${P(p.targetQ,p.targetR)}`;
+      add(a,'atk',`${w} → ${tgt}：${p.hit===false?'未命中':'造成 '+p.dmg}`,'遠程攻擊');
+      if(d){
+        add(d,'def',`被 ${lbl(a)} ${w}：受 ${p.dmg||0}`,'被遠程攻擊');
+        if(typeof p.defenderHP==='number') cell(d).hp = p.defenderHP;
+      }
+    }
+    else if(t==='UNIT_DEATH_SYNC'){
+      if(dead[p.uid]==null){ dead[p.uid]=turn; add(p.uid,'die','☠ 陣亡','陣亡'); }
+    }
+    else if(t==='PSYOPS_BROADCAST_RESULT'){
+      add(p.unitUID,'oth',`心戰廣播（影響 ${(p.towns||[]).length} 格城鎮、${(p.units||[]).length} 個單位）`,'心戰廣播');
+    }
+    else if(t==='PSY_SHELL_RESULT'){
+      add(p.artUID,'oth',`心戰砲 → ${P(p.targetQ,p.targetR)}`,'心戰砲');
+    }
+    else if(t==='TOWN_EVENT_SYNC'){
+      add(p.unitUID,'oth',`城鎮事件「${p.evtName||p.evtID}」${P(p.tileQ,p.tileR)}`,'城鎮事件');
+    }
+    else if(t==='REFUGEE_EVENT'){
+      if(p.uid && units[p.uid]) add(p.uid,'oth',`${REFUGEE_ZH[p.op]||('災民:'+p.op)}`,'災民');
+    }
+    else if(t==='MINE_PLACE' || t==='MINE_DEFUSE' || t==='DEPOT_SYNC' || t==='DEPOT_REMOVE'){
+      const kind = t==='MINE_PLACE'?'布雷': t==='MINE_DEFUSE'?'排雷': t==='DEPOT_SYNC'?'補給點':'補給點移除';
+      let txt = t==='DEPOT_SYNC' ? `補給點 ${P(p.q,p.r)}（糧${p.food} 彈${p.ammo} 油${p.fuel}）`
+              : t==='DEPOT_REMOVE' ? `補給點移除 ${P(p.q,p.r)}（可能被摧毀或撤除）`
+              : `${kind} ${P(p.q,p.r)}`;
+      const who = t==='DEPOT_REMOVE' ? null : findActor(e.fromPID, p.q, p.r, pos, dead, units, t==='DEPOT_SYNC');
+      if(who){ add(who.uid,'oth', txt + (who.guess?'（推測）':''), kind); }
+      else add(extraKey(e.fromPID),'oth',txt,kind);
+    }
+    else if(t==='TURN_UPKEEP_SYNC'){
+      const tt = p.turnCount;
+      for(const s of (p.survivors||[])){
+        if(!cells[s.uid]) cells[s.uid] = {};
+        if(!cells[s.uid][tt]) cells[s.uid][tt] = { start: pos[s.uid]?{...pos[s.uid]}:null, end:null, moves:0, lines:[], hp:null };
+        const f = s.fields||{};
+        if(typeof f.hp==='number') cells[s.uid][tt].hp = f.hp;
+      }
+    }
+  }
+  if(maxTurn < turn) maxTurn = turn;
+
+  const list = list0;
+  // 玩家層級事件（布雷等）
+  const extras = [];
+  for(const uid of Object.keys(cells)){
+    if(uid.startsWith('X_')){
+      const id = parseInt(uid.slice(2),10);
+      const tm = (list.find(u=>u.pid===id)||{}).team || '';
+      extras.push({ uid, team:tm, pid:id, typeID:'', label:`${pn(id)}-其他（無法對應單位的事件）`, player:pn(id), extra:true });
+    }
+  }
+  extras.sort((a,b)=> a.pid-b.pid);
+  const rows = list.concat(extras);
+
+  return { meta, rows, cells, dead, maxTurn, pos, units, events, pname, };
+}
+
+// 明細要等單位標籤定案後才組字串，所以用第二輪重放
+function buildLong(model){
+  const { events, units, pname } = model;
+  const pid = uid => parseInt(String(uid).split('_')[0],10);
+  const pn = id => pname[id] || ('玩家'+id);
+  const lbl = uid => (units[uid] && units[uid].label) || String(uid);
+  const out = [];
+  const pos = {}; let turn = 0; const dead = {};
+  const P = (q,r)=>`(${q},${r})`;
+  const push = (uid,kind,text,teamOverride)=>{
+    const u = units[uid];
+    out.push({ turn, team: teamOverride || (u&&u.team) || '', player: u?u.player:pn(pid(String(uid).replace('X_',''))),
+               unit: u?u.label:'（玩家事件）', kind, text });
+  };
+  for(const e of events){
+    const p=e.payload||{}, t=e.type;
+    if(t==='TURN_ADVANCE') turn=p.turnCount||0;
+    else if(t==='UNIT_SPAWN'){ pos[p.uid]={q:p.q,r:p.r}; push(p.uid,'部署',`部署 ${P(p.q,p.r)}`); }
+    else if(t==='UNIT_MOVE'){ const f=pos[p.uid]; if(!f||f.q!==p.q||f.r!==p.r) push(p.uid,'移動',`${f?P(f.q,f.r):'?'}→${P(p.q,p.r)}`); pos[p.uid]={q:p.q,r:p.r}; }
+    else if(t==='ATTACK_RESULT'){
+      push(p.attackerUID,'近戰攻擊',`攻擊 ${lbl(p.defenderUID)}：造成 ${p.damage}，受反擊 ${p.counterDmg}`);
+      push(p.defenderUID,'被近戰攻擊',`被 ${lbl(p.attackerUID)} 攻擊：受 ${p.damage}，反擊 ${p.counterDmg}`);
+    }
+    else if(t==='RANGED_ATTACK_RESULT'){
+      const w=WEAPON_ZH[p.weapon]||p.weapon;
+      push(p.attackerUID,'遠程攻擊',`${w} → ${p.defenderUID?lbl(p.defenderUID):'地點 '+P(p.targetQ,p.targetR)}：${p.hit===false?'未命中':'造成 '+p.dmg}`);
+      if(p.defenderUID) push(p.defenderUID,'被遠程攻擊',`被 ${lbl(p.attackerUID)} ${w}：受 ${p.dmg||0}`);
+    }
+    else if(t==='UNIT_DEATH_SYNC'){ if(!dead[p.uid]){ dead[p.uid]=1; push(p.uid,'陣亡','陣亡'); } }
+    else if(t==='PSYOPS_BROADCAST_RESULT') push(p.unitUID,'心戰廣播',`影響 ${(p.towns||[]).length} 格城鎮、${(p.units||[]).length} 個單位`);
+    else if(t==='PSY_SHELL_RESULT') push(p.artUID,'心戰砲',`→ ${P(p.targetQ,p.targetR)}`);
+    else if(t==='TOWN_EVENT_SYNC') push(p.unitUID,'城鎮事件',`「${p.evtName||p.evtID}」${P(p.tileQ,p.tileR)}`);
+    else if(t==='REFUGEE_EVENT'){ if(p.uid&&units[p.uid]) push(p.uid,'災民',REFUGEE_ZH[p.op]||p.op); }
+    else if(t==='MINE_PLACE' || t==='MINE_DEFUSE' || t==='DEPOT_SYNC' || t==='DEPOT_REMOVE'){
+      const kind = t==='MINE_PLACE'?'布雷': t==='MINE_DEFUSE'?'排雷': t==='DEPOT_SYNC'?'補給點':'補給點移除';
+      const txt = t==='DEPOT_SYNC' ? `${P(p.q,p.r)}（糧${p.food} 彈${p.ammo} 油${p.fuel}）`
+              : t==='DEPOT_REMOVE' ? `${P(p.q,p.r)}（可能被摧毀或撤除）` : P(p.q,p.r);
+      const who = t==='DEPOT_REMOVE' ? null : findActor(e.fromPID, p.q, p.r, pos, dead, units, t==='DEPOT_SYNC');
+      const tm = p.placerTeam || p.team;
+      if(who) push(who.uid, kind, txt + (who.guess?'（推測）':''));
+      else push('X_'+e.fromPID, kind, txt, tm);
+    }
+  }
+  return out;
+}
+
+// 單一格子的文字（matrix）
+function cellView(model, u, turn, opt){
+  const c = (model.cells[u.uid]||{})[turn];
+  const diedAt = model.dead[u.uid];
+  if(u.extra){
+    if(!c) return null;
+    return { cls:'', parts: c.lines.map(l=>({cls:l.cls,text:l.text})) };
+  }
+  if(diedAt!=null && turn>diedAt) return { cls:'dead', parts:[] };
+  const parts = [];
+  // 位置
+  let startP=null, endP=null;
+  if(c){
+    startP = c.start; endP = c.end;
+  }
+  // 以逐回合位置表為準
+  const pt = model.posByTurn[u.uid] || {};
+  const s = pt[turn] ? pt[turn].start : null, en = pt[turn] ? pt[turn].end : null;
+  const touched = c && (c.lines.length>0 || c.moves>0);
+  if(!pt[turn] && !touched) return null; // 單位尚未出現
+  if(s && en && (s.q!==en.q || s.r!==en.r)) parts.push({cls:'pos', text:`(${s.q},${s.r})→(${en.q},${en.r})` + ((c&&c.moves>1)?`（${c.moves}段）`:'')});
+  else if(en) parts.push({cls:'pos', text:`(${en.q},${en.r})`});
+  if(c) for(const l of c.lines){ if(l.cls==='pos' && l.text.startsWith('部署') && parts.length) { parts.length=0; } parts.push({cls:l.cls, text:l.text}); }
+  if(opt.hp && c && typeof c.hp==='number') parts.push({cls:'hp', text:`HP ${c.hp}`});
+  const idle = !touched;
+  if(idle && !opt.idle) return { cls:'idle', parts:[] };
+  if(idle) parts.push({cls:'hp', text:'待命'});
+  return { cls: idle?'idle':'', parts };
+}
+
+// 逐回合位置（起/終）
+function buildPosByTurn(model){
+  const by = {}; const pos = {}; let turn = 0;
+  const touch = (uid,tn)=>{ by[uid]=by[uid]||{}; if(!by[uid][tn]) by[uid][tn]={ start: pos[uid]?{...pos[uid]}:null, end: pos[uid]?{...pos[uid]}:null }; return by[uid][tn]; };
+  const dead = model.dead;
+  const units = model.units;
+  const turnsList = [];
+  for(const e of model.events){
+    const p=e.payload||{};
+    if(e.type==='TURN_ADVANCE'){
+      turn=p.turnCount||0;
+      // 每個回合開始時，所有存活單位都建立該回合的位置紀錄
+      for(const uid of Object.keys(pos)){ if(dead[uid]==null || dead[uid]>=turn) touch(uid,turn); }
+    }
+    else if(e.type==='UNIT_SPAWN'){ pos[p.uid]={q:p.q,r:p.r}; const c=touch(p.uid,turn); c.start=null; c.end={q:p.q,r:p.r}; }
+    else if(e.type==='UNIT_MOVE'){ const c=touch(p.uid,turn); pos[p.uid]={q:p.q,r:p.r}; c.end={q:p.q,r:p.r}; }
+  }
+  return by;
+}
+</script>
+
+<script>
+// ═════════════ 介面 ═════════════
+let MODEL = null, VIEW = 'matrix', LONG = [];
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+$('f').addEventListener('change', async ev=>{
+  const f = ev.target.files[0]; if(!f) return;
+  $('err').style.display='none';
+  try{
+    const text = await f.text();
+    MODEL = parseReplay(text);
+    MODEL.posByTurn = buildPosByTurn(MODEL);
+    LONG = buildLong(MODEL);
+    MODEL.fileName = f.name;
+    init();
+  }catch(e){
+    $('err').textContent = '讀取失敗：' + e.message; $('err').style.display='block';
+  }
+});
+
+function init(){
+  const m = MODEL.meta;
+  const win = m.winner ? `${TEAM_ZH[m.winner]||m.winner}勝（${m.reason||'—'}）` : '（檔案中沒有結束紀錄）';
+  $('meta').style.display='block';
+  $('meta').innerHTML = `<b>${esc(MODEL.fileName)}</b><br>地圖：${esc(m.map||'—')}　回合：0～${MODEL.maxTurn}　單位：${MODEL.rows.filter(r=>!r.extra).length}　結果：${esc(win)}`;
+  // 玩家下拉
+  const pl = new Map();
+  for(const r of MODEL.rows) if(!pl.has(r.pid)) pl.set(r.pid, {name:r.player, team:r.team});
+  const sel = $('fplayer'); sel.innerHTML = '<option value="">全部玩家</option>';
+  [...pl.entries()].sort((a,b)=>a[0]-b[0]).forEach(([id,v])=>{
+    const o=document.createElement('option'); o.value=id; o.textContent=`${v.name}（${TEAM_ZH[v.team]||'—'}）`; sel.appendChild(o);
+  });
+  $('filters').style.display='flex'; $('tabs').style.display='flex'; $('xlsx').disabled=false;
+  render();
+}
+
+function opts(){ return { team:$('fteam').value, player:$('fplayer').value, hp:$('fhp').checked, idle:$('fidle').checked }; }
+function visibleRows(o){ return MODEL.rows.filter(r => (!o.team || r.team===o.team) && (!o.player || String(r.pid)===o.player)); }
+
+function render(){
+  if(!MODEL) return;
+  const o = opts(); const wrap = $('wrap');
+  $('fhp').parentElement.style.display = $('fidle').parentElement.style.display = VIEW==='matrix' ? 'flex':'none';
+  if(VIEW==='matrix'){
+    const rows = visibleRows(o);
+    if(!rows.length){ wrap.innerHTML='<div class="empty">沒有符合的單位</div>'; return; }
+    let h = '<table><thead><tr><th>單位</th>';
+    for(let t=0;t<=MODEL.maxTurn;t++) h += `<th>${t===0?'回合 0（部署）':'回合 '+t}</th>`;
+    h += '</tr></thead><tbody>';
+    for(const u of rows){
+      h += `<tr class="${u.team}"><th>${esc(u.label)}</th>`;
+      for(let t=0;t<=MODEL.maxTurn;t++){
+        const v = cellView(MODEL,u,t,o);
+        if(!v) h += '<td class="cell idle"></td>';
+        else if(v.cls==='dead') h += '<td class="cell dead">—</td>';
+        else h += `<td class="cell ${v.cls}">` + v.parts.map(x=>`<div class="${x.cls}">${esc(x.text)}</div>`).join('') + '</td>';
+      }
+      h += '</tr>';
+    }
+    wrap.innerHTML = h + '</tbody></table>';
+  } else {
+    const rows = LONG.filter(r => (!o.team || r.team===o.team) && (!o.player || r.player===(MODEL.rows.find(x=>String(x.pid)===o.player)||{}).player));
+    if(!rows.length){ wrap.innerHTML='<div class="empty">沒有符合的紀錄</div>'; return; }
+    let h = '<table><thead><tr><th>回合</th><th>陣營</th><th>玩家</th><th>單位</th><th>行動</th><th>內容</th></tr></thead><tbody>';
+    for(const r of rows) h += `<tr class="${r.team}"><td>${r.turn}</td><td>${TEAM_ZH[r.team]||''}</td><td>${esc(r.player)}</td><td>${esc(r.unit)}</td><td>${esc(r.kind)}</td><td style="white-space:normal">${esc(r.text)}</td></tr>`;
+    wrap.innerHTML = h + '</tbody></table>';
+    // 明細的第一欄不需要 sticky 樣式
+    wrap.querySelectorAll('tbody tr').forEach(tr=>{});
+  }
+}
+['fteam','fplayer','fhp','fidle'].forEach(id=>$(id).addEventListener('change',render));
+$('t1').onclick=()=>{VIEW='matrix';$('t1').classList.add('on');$('t2').classList.remove('on');render()};
+$('t2').onclick=()=>{VIEW='long';$('t2').classList.add('on');$('t1').classList.remove('on');render()};
+
+// ═════════════ Excel 匯出（不需外部套件）═════════════
+function crc32(buf){
+  let c, crc = 0xFFFFFFFF;
+  if(!crc32.t){ crc32.t=[]; for(let n=0;n<256;n++){ c=n; for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; crc32.t[n]=c>>>0; } }
+  for(let i=0;i<buf.length;i++) crc = crc32.t[(crc^buf[i])&255] ^ (crc>>>8);
+  return (crc^0xFFFFFFFF)>>>0;
+}
+function zipStore(files){ // files: [{name, data:Uint8Array}]
+  const enc = new TextEncoder(); const chunks=[]; const central=[]; let off=0;
+  const u16=n=>[n&255,(n>>8)&255], u32=n=>[n&255,(n>>8)&255,(n>>16)&255,(n>>>24)&255];
+  for(const f of files){
+    const name = enc.encode(f.name), crc = crc32(f.data), sz = f.data.length;
+    const lh = new Uint8Array([0x50,0x4b,3,4, ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(crc), ...u32(sz), ...u32(sz), ...u16(name.length), ...u16(0)]);
+    chunks.push(lh, name, f.data);
+    central.push({name, crc, sz, off});
+    off += lh.length + name.length + sz;
+  }
+  const cdStart = off;
+  for(const c of central){
+    const ch = new Uint8Array([0x50,0x4b,1,2, ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(0), ...u16(0x21), ...u32(c.crc), ...u32(c.sz), ...u32(c.sz), ...u16(c.name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(c.off)]);
+    chunks.push(ch, c.name); off += ch.length + c.name.length;
+  }
+  const end = new Uint8Array([0x50,0x4b,5,6, 0,0,0,0, ...u16(central.length), ...u16(central.length), ...u32(off-cdStart), ...u32(cdStart), 0,0]);
+  chunks.push(end);
+  return new Blob(chunks, {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+}
+const xe = s => String(s).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function colName(i){ let s=''; i++; while(i>0){ const m=(i-1)%26; s=String.fromCharCode(65+m)+s; i=Math.floor((i-1)/26); } return s; }
+function sheetXml(grid, widths, freeze){ // grid: [[{v,s}]]
+  let x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+  x += '<sheetViews><sheetView workbookViewId="0">';
+  if(freeze) x += `<pane xSplit="${freeze.x}" ySplit="${freeze.y}" topLeftCell="${colName(freeze.x)}${freeze.y+1}" activePane="bottomRight" state="frozen"/>`;
+  x += '</sheetView></sheetViews><cols>';
+  widths.forEach((w,i)=>{ x += `<col min="${i+1}" max="${i+1}" width="${w}" customWidth="1"/>`; });
+  x += '</cols><sheetData>';
+  grid.forEach((row,ri)=>{
+    x += `<row r="${ri+1}">`;
+    row.forEach((c,ci)=>{
+      if(c==null || c.v==='' || c.v==null) { if(c&&c.s) x += `<c r="${colName(ci)}${ri+1}" s="${c.s}"/>`; return; }
+      const ref = colName(ci)+(ri+1);
+      if(typeof c.v==='number') x += `<c r="${ref}" s="${c.s||0}"><v>${c.v}</v></c>`;
+      else x += `<c r="${ref}" s="${c.s||0}" t="inlineStr"><is><t xml:space="preserve">${xe(c.v)}</t></is></c>`;
+    });
+    x += '</row>';
+  });
+  return x + '</sheetData></worksheet>';
+}
+const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="2"><font><sz val="11"/><name val="Microsoft JhengHei"/></font><font><b/><sz val="11"/><name val="Microsoft JhengHei"/></font></fonts>
+<fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFD9D9D9"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFF8D7D7"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFD7E4F8"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFEFEFEF"/></patternFill></fill></fills>
+<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left style="thin"><color rgb="FFBBBBBB"/></left><right style="thin"><color rgb="FFBBBBBB"/></right><top style="thin"><color rgb="FFBBBBBB"/></top><bottom style="thin"><color rgb="FFBBBBBB"/></bottom><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="6">
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="0" fillId="5" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+</cellXfs></styleSheet>`;
+
+function cellPlain(v){ return v ? v.parts.map(p=>p.text).join('\n') : ''; }
+function exportXlsx(){
+  if(!MODEL) return;
+  const o = opts();
+  const rows = visibleRows(o);
+  // 工作表 1：矩陣
+  const g1 = [[{v:'單位',s:1},{v:'陣營',s:1}]];
+  for(let t=0;t<=MODEL.maxTurn;t++) g1[0].push({v:t===0?'回合0（部署）':'回合'+t, s:1});
+  for(const u of rows){
+    const line = [{v:u.label, s:u.team==='RED'?2:u.team==='BLUE'?3:5},{v:TEAM_ZH[u.team]||'', s:u.team==='RED'?2:u.team==='BLUE'?3:5}];
+    for(let t=0;t<=MODEL.maxTurn;t++){
+      const v = cellView(MODEL,u,t,o);
+      line.push({ v: v && v.cls==='dead' ? '—' : cellPlain(v), s: v && (v.cls==='dead'||v.cls==='idle') ? 4 : 0 });
+    }
+    g1.push(line);
+  }
+  const w1 = [18,6]; for(let t=0;t<=MODEL.maxTurn;t++) w1.push(24);
+  // 工作表 2：明細（長表，方便篩選／樞紐分析）
+  const g2 = [['回合','陣營','玩家','單位','行動','內容'].map(v=>({v,s:1}))];
+  const lr = LONG.filter(r => (!o.team || r.team===o.team) && (!o.player || r.player===(MODEL.rows.find(x=>String(x.pid)===o.player)||{}).player));
+  for(const r of lr) g2.push([{v:r.turn,s:0},{v:TEAM_ZH[r.team]||'',s:0},{v:r.player,s:0},{v:r.unit,s:0},{v:r.kind,s:0},{v:r.text,s:0}]);
+  const enc = new TextEncoder(); const F = (n,s)=>({name:n,data:enc.encode(s)});
+  const files = [
+    F('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'),
+    F('_rels/.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+    F('xl/workbook.xml','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="行動矩陣" sheetId="1" r:id="rId1"/><sheet name="行動明細" sheetId="2" r:id="rId2"/></sheets></workbook>'),
+    F('xl/_rels/workbook.xml.rels','<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'),
+    F('xl/styles.xml',STYLES),
+    F('xl/worksheets/sheet1.xml',sheetXml(g1,w1,{x:2,y:1})),
+    F('xl/worksheets/sheet2.xml',sheetXml(g2,[7,8,18,24,14,60],{x:0,y:1})),
+  ];
+  const blob = zipStore(files);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (MODEL.fileName||'replay').replace(/\.[^.]+$/,'') + '_行動表.xlsx';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+}
+$('xlsx').onclick = exportXlsx;
+</script>
+</body>
+</html>
